@@ -1089,6 +1089,74 @@ function generate_set_stats(set) {
   return stats;
 }
 
+// "Do X for Y seconds" logic accumulates hits while a condition holds and resets them when it doesn't.
+// That doesn't need a Delta, as long as the hit target is long enough to be a real timer.
+const TIMER_MIN_HITS = 60;
+const TIMER_FLAGS = new Set([null, ReqFlag.MEASURED, ReqFlag.MEASUREDP, ReqFlag.TRIGGER]);
+
+function req_key(prefix, req) {
+  const c = req.canonicalize();
+  return prefix + c.lhs.toString() + c.op + c.rhs.toString();
+}
+
+function* walk_prefixed(g) {
+  let _prefix = "";
+  for (let i = 0; i < g.length; i++) {
+    const req = g[i];
+    if (req.flag === ReqFlag.ADDADDRESS) {
+      _prefix += req.lhs.toString() + (!req.rhs ? "" : req.op + req.rhs.toString()) + ":";
+    } else {
+      yield { i, prefix: _prefix, req };
+      _prefix = "";
+    }
+  }
+}
+
+function find_timer_groups(logic) {
+  // every condition that resets all hits when true
+  const resets = new Set();
+  for (const g of logic.groups) {
+    for (const { prefix, req } of walk_prefixed(g)) {
+      if (req.flag === ReqFlag.RESETIF && req.isComparisonOperator() && req.hits === 0) {
+        resets.add(req_key(prefix, req));
+      }
+    }
+  }
+
+  return logic.groups.map((g) => {
+    for (const { i, prefix, req } of walk_prefixed(g)) {
+      if (!TIMER_FLAGS.has(req.flag) || !req.isComparisonOperator() || req.hits < TIMER_MIN_HITS) {
+        continue;
+      }
+      // only a single condition (optionally behind AddAddress), not part of a larger chain
+      let start = i;
+      while (start > 0 && g[start - 1].flag === ReqFlag.ADDADDRESS) {
+        start--;
+      }
+      let resetnext = null;
+      if (start > 0 && g[start - 1].flag === ReqFlag.RESETNEXTIF) {
+        resetnext = g[start - 1];
+      } else if (start > 0 && !g[start - 1].isTerminating()) {
+        continue;
+      }
+
+      const inverted = req.clone();
+      inverted.reverseComparison();
+      const key = req_key(prefix, inverted);
+      if (resets.has(key)) {
+        return true;
+      }
+      if (resetnext && resetnext.isComparisonOperator() && resetnext.hits === 0) {
+        // the ResetNextIf must sit in front of the AddAddress chain, so it shares no prefix
+        if (start === i && req_key("", resetnext) === key) {
+          return true;
+        }
+      }
+    }
+    return false;
+  });
+}
+
 function* check_deltas(logic) {
   const DELTA_FEEDBACK = (
     <ul>
@@ -1115,6 +1183,15 @@ function* check_deltas(logic) {
     </ul>
   );
 
+  // a timer in the core, or in every alt group, isolates the trigger moment just like a Delta would
+  const timer_groups = find_timer_groups(logic);
+  const alts_valid = (valid) =>
+    logic.groups.length > 1 &&
+    logic.groups.slice(1).every((g, gi) => valid[gi + 1] || g.some((req) => req.isAlwaysFalse()));
+  if (timer_groups[0] || alts_valid(timer_groups)) {
+    return;
+  }
+
   if (!logic.getOperands().some((x) => x.type === ReqType.DELTA)) {
     yield new Issue(Feedback.MISSING_DELTA, null, DELTA_FEEDBACK);
     return;
@@ -1140,7 +1217,7 @@ function* check_deltas(logic) {
   const delta_groups = logic.groups.map((g, gi) => {
     // If the group contains an always-false condition, it can never trigger.
     // Therefore, it doesn't need a delta. Consider it "valid" for this check.
-    if (g.some((req) => req.isAlwaysFalse())) {
+    if (g.some((req) => req.isAlwaysFalse()) || timer_groups[gi]) {
       return true;
     }
 
@@ -1202,8 +1279,8 @@ function* check_deltas(logic) {
   for (const core_unmatched_delta of core_unmatched_delta_set) {
     const mem_groups = logic.groups.slice(1).map((g, gi) => {
       // If the group contains an always-false condition, it can never trigger.
-      // Therefore, it doesn't need a mem matching this delta from the core
-      if (g.some((req) => req.isAlwaysFalse())) {
+      // Therefore, it doesn't need a mem matching this delta from the core. Neither does a timer.
+      if (g.some((req) => req.isAlwaysFalse()) || timer_groups[gi + 1]) {
         return true;
       }
 

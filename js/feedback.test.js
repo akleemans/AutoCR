@@ -298,6 +298,92 @@ describe("Util: assess_achievement", () => {
       expect(collectDeltaFeedbackNames(report)).toEqual(["IMPROPER_DELTA"]);
     });
   });
+
+  describe("given logic that holds a condition for a period of time instead of using Delta", () => {
+    it("given a hit timer reset by its opposite condition, flags no Delta feedback", () => {
+      // Hold the timer for 20 seconds, reset when the condition breaks.
+      const target = makeAchievement({
+        logic:
+          "G:0xH000420=2.1200._R:0xH000420!=2_P:0xH000704=99.1.SN:0xH000706=1_N:0xH000707=1_R:0xH000704=0",
+      });
+
+      const report = assess_achievement(target);
+
+      expect(collectDeltaFeedbackNames(report)).toEqual([]);
+    });
+
+    it("given a hit timer whose opposite reset uses a reversed operator, flags no Delta feedback", () => {
+      // Keep a train above a given speed for 3 seconds, reset when it drops below.
+      const target = makeAchievement({
+        logic: "0x 000006=0_0xH00000a=0_0x 001058>=301.180._P:0xH000fd2=255_R:0x 001058<301",
+      });
+
+      const report = assess_achievement(target);
+
+      expect(collectDeltaFeedbackNames(report)).toEqual([]);
+    });
+
+    it("given a hit timer and opposite reset reached through the same AddAddress pointer, flags no Delta feedback", () => {
+      const target = makeAchievement({
+        logic: "0xHfdb7>=1_0xHfdb6=0_I:0x 4e2a_0x 0078=162.154._I:0x 4e2a_R:0x 0078!=162",
+      });
+
+      const report = assess_achievement(target);
+
+      expect(collectDeltaFeedbackNames(report)).toEqual([]);
+    });
+
+    it("given a hit timer in every alt group, each reset by an opposite ResetNextIf, flags no Delta feedback", () => {
+      const target = makeAchievement({
+        logic: "P:0xH0105!=17SZ:0xH0007!=129_0xH0007=129.100.SZ:0xH0007!=130_0xH0007=130.100.",
+      });
+
+      const report = assess_achievement(target);
+
+      expect(collectDeltaFeedbackNames(report)).toEqual([]);
+    });
+
+    it("given a hit timer in only some alt groups, flags IMPROPER_DELTA", () => {
+      const target = makeAchievement({
+        logic: "0xH005678=1S0xH001234=1.60._R:0xH001234!=1S0xH001234=2_d0xH001234=1S0xH009999=3",
+      });
+
+      const report = assess_achievement(target);
+
+      expect(collectDeltaFeedbackNames(report)).toEqual(["IMPROPER_DELTA"]);
+    });
+
+    it("given a hit timer reset by an unrelated condition, flags MISSING_DELTA", () => {
+      // Resetting when the address hits 0 doesn't reset the timer when the condition breaks for any other value.
+      const target = makeAchievement({
+        logic:
+          "G:0xH000420=2.1200._R:0xH000420=0_P:0xH000704=99.1.SN:0xH000706=1_N:0xH000707=1_R:0xH000704=0",
+      });
+
+      const report = assess_achievement(target);
+
+      expect(collectDeltaFeedbackNames(report)).toEqual(["MISSING_DELTA"]);
+    });
+
+    it("given a hit count below 60 frames reset by its opposite condition, flags MISSING_DELTA", () => {
+      // 30 frames is not a "do X for Y seconds" timer.
+      const target = makeAchievement({ logic: "0xH00b156=3.30._R:0xH00b156!=3" });
+
+      const report = assess_achievement(target);
+
+      expect(collectDeltaFeedbackNames(report)).toEqual(["MISSING_DELTA"]);
+    });
+
+    it("given a hit timer that is part of an AndNext chain, flags MISSING_DELTA", () => {
+      const target = makeAchievement({
+        logic: "N:0xH0061=193_N:0xH006a=255_0xH0068=1.60._R:0xH0068!=1",
+      });
+
+      const report = assess_achievement(target);
+
+      expect(collectDeltaFeedbackNames(report)).toEqual(["MISSING_DELTA"]);
+    });
+  });
 });
 
 describe("Util: assess_leaderboard", () => {
