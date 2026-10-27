@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
+import { renderToStaticMarkup } from "react-dom/server";
 
 import { Achievement, AchievementSet, CodeNote, CodeNoteSet } from "./achievements";
 import { Feedback, assess_achievement, assess_leaderboard } from "./feedback";
@@ -22,6 +23,14 @@ function collectFeedbackNames(assessment) {
 
 function collectDeltaFeedbackNames(assessment) {
   return collectFeedbackNames(assessment).filter((name) => DELTA_FEEDBACK_TYPES.has(name));
+}
+
+function collectDeltaDetailText(assessment) {
+  return assessment.issues
+    .flat()
+    .filter((issue) => DELTA_FEEDBACK_TYPES.has(NAME_BY_FEEDBACK_TYPE.get(issue.type)))
+    .map((issue) => renderToStaticMarkup(issue.detail))
+    .join("\n");
 }
 
 function describeExpectation(names) {
@@ -363,6 +372,30 @@ describe("Util: assess_achievement", () => {
       const report = assess_achievement(target);
 
       expect(collectDeltaFeedbackNames(report)).toEqual(["MISSING_DELTA"]);
+      expect(collectDeltaDetailText(report)).toContain("can act as a timer");
+    });
+
+    it("given a hit timer reset by an unrelated condition, recommends the opposite ResetIf", () => {
+      const target = makeAchievement({
+        logic:
+          "G:0xH000420=2.1200._R:0xH000420=0_P:0xH000704=99.1.SN:0xH000706=1_N:0xH000707=1_R:0xH000704=0",
+      });
+
+      const report = assess_achievement(target);
+
+      expect(collectDeltaDetailText(report)).toMatch(
+        /ResetIf\s+Mem\s+8-bit\s+0x00000420\s*!=\s+Value\s+2\s/,
+      );
+    });
+
+    it("given a hit timer behind AddAddress with no reset, recommends a ResetIf through the same pointer", () => {
+      const target = makeAchievement({ logic: "0xHfdb7>=1_I:0x 4e2a_0x 0078=162.154." });
+
+      const report = assess_achievement(target);
+
+      expect(collectDeltaDetailText(report)).toMatch(
+        /AddAddress\s+Mem\s+16-bit\s+0x00004e2a\s*\nResetIf\s+Mem\s+16-bit\s+0x00000078\s*!=\s+Value\s+162\s/,
+      );
     });
 
     it("given a hit count below 60 frames reset by its opposite condition, flags MISSING_DELTA", () => {
@@ -372,6 +405,7 @@ describe("Util: assess_achievement", () => {
       const report = assess_achievement(target);
 
       expect(collectDeltaFeedbackNames(report)).toEqual(["MISSING_DELTA"]);
+      expect(collectDeltaDetailText(report)).not.toContain("can act as a timer");
     });
 
     it("given a hit timer that is part of an AndNext chain, flags MISSING_DELTA", () => {

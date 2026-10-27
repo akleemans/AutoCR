@@ -1112,6 +1112,7 @@ function* walk_prefixed(g) {
   }
 }
 
+// Returns which groups hold a valid timer, plus timers that are missing the opposite reset.
 function find_timer_groups(logic) {
   // every condition that resets all hits when true
   const resets = new Set();
@@ -1123,7 +1124,8 @@ function find_timer_groups(logic) {
     }
   }
 
-  return logic.groups.map((g) => {
+  const unreset = [];
+  const valid = logic.groups.map((g) => {
     for (const { i, prefix, req } of walk_prefixed(g)) {
       if (!TIMER_FLAGS.has(req.flag) || !req.isComparisonOperator() || req.hits < TIMER_MIN_HITS) {
         continue;
@@ -1152,9 +1154,20 @@ function find_timer_groups(logic) {
           return true;
         }
       }
+      unreset.push(g.slice(start, i + 1));
     }
     return false;
   });
+  return { unreset, valid };
+}
+
+// the ResetIf that would turn a timer chain into a valid one
+function timer_reset_chain(chain) {
+  const reset = chain.at(-1).clone();
+  reset.flag = ReqFlag.RESETIF;
+  reset.hits = 0;
+  reset.reverseComparison();
+  return [...chain.slice(0, -1), reset].map((req) => req.toMarkdown()).join("\n");
 }
 
 function* check_deltas(logic) {
@@ -1184,7 +1197,7 @@ function* check_deltas(logic) {
   );
 
   // a timer in the core, or in every alt group, isolates the trigger moment just like a Delta would
-  const timer_groups = find_timer_groups(logic);
+  const { unreset, valid: timer_groups } = find_timer_groups(logic);
   const alts_valid = (valid) =>
     logic.groups.length > 1 &&
     logic.groups.slice(1).every((g, gi) => valid[gi + 1] || g.some((req) => req.isAlwaysFalse()));
@@ -1192,8 +1205,28 @@ function* check_deltas(logic) {
     return;
   }
 
+  // a hit timer without the opposite reset is likely meant as "do X for Y seconds", so point that out
+  const feedback = !unreset.length ? (
+    DELTA_FEEDBACK
+  ) : (
+    <>
+      {DELTA_FEEDBACK}
+      <ul>
+        <li>
+          Hit counts of {TIMER_MIN_HITS} or more can act as a timer instead of a Delta, but only if
+          the hits are reset when the condition stops being true. Recommended change:
+        </li>
+        {unreset.map((chain) => (
+          <pre key={chain.at(-1).toRefString()}>
+            <code>{timer_reset_chain(chain)}</code>
+          </pre>
+        ))}
+      </ul>
+    </>
+  );
+
   if (!logic.getOperands().some((x) => x.type === ReqType.DELTA)) {
-    yield new Issue(Feedback.MISSING_DELTA, null, DELTA_FEEDBACK);
+    yield new Issue(Feedback.MISSING_DELTA, null, feedback);
     return;
   }
 
@@ -1307,7 +1340,7 @@ function* check_deltas(logic) {
   }
 
   // we know there's an issue
-  yield new Issue(Feedback.IMPROPER_DELTA, null, DELTA_FEEDBACK);
+  yield new Issue(Feedback.IMPROPER_DELTA, null, feedback);
 }
 
 function* check_missing_notes(logic) {
